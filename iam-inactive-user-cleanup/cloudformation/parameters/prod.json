@@ -1,0 +1,14 @@
+[
+  {
+    "ParameterKey": "InactivityThresholdDays",
+    "ParameterValue": "90"
+  },
+  {
+    "ParameterKey": "GracePeriodDays",
+    "ParameterValue": "30"
+  },
+  {
+    "ParameterKey": "NotificationEmail",
+    "ParameterValue": "security-team@yourcompany.com"
+  }
+]

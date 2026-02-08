@@ -1,0 +1,123 @@
+# AWS Credentials and Secrets
+*.pem
+*.key
+*.p12
+.aws/
+credentials
+config
+secrets.yaml
+secrets.json
+secret-*.yaml
+secret-*.json
+
+# CloudFormation outputs
+cloudformation-outputs/
+stack-outputs/
+*.stack-output.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+venv/
+ENV/
+env/
+.venv
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+.hypothesis/
+test-results/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+logs/
+*.out
+
+# Terraform (for future additions)
+.terraform/
+*.tfstate
+*.tfstate.backup
+.terraform.lock.hcl
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# AWS SAM
+.aws-sam/
+samconfig.toml
+
+# Node modules (if any JavaScript tools)
+node_modules/
+package-lock.json
+
+# Documentation builds
+docs/_build/
+site/
+
+# Local test data
+test-data/
+local-testing/
+
+# Personal notes
+NOTES.md
+TODO.md
+personal/
+
+# Account-specific files
+account-*.json
+account-*.yaml
+*-account-id.txt
+
+# Coverage reports
+coverage/
+.nyc_output/
+
+# Debugging
+debug.log
+error.log

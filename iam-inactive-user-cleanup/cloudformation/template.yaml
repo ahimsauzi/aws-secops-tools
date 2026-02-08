@@ -1,0 +1,665 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation template for automated IAM inactive user detection and cleanup'
+
+Parameters:
+  InactivityThresholdDays:
+    Type: Number
+    Default: 90
+    MinValue: 1
+    MaxValue: 365
+    Description: 'Number of days of inactivity before flagging a user'
+  
+  GracePeriodDays:
+    Type: Number
+    Default: 30
+    MinValue: 1
+    MaxValue: 90
+    Description: 'Number of days grace period before deleting inactive user'
+  
+  NotificationEmail:
+    Type: String
+    Description: 'Email address for notifications (can be a distribution list)'
+    AllowedPattern: '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+
+Resources:
+  # DynamoDB Table for tracking inactive users
+  InactiveUsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AWS::StackName}-InactiveUsers'
+      BillingMode: PAY_PER_REQUEST
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      AttributeDefinitions:
+        - AttributeName: username
+          AttributeType: S
+      KeySchema:
+        - AttributeName: username
+          KeyType: HASH
+      Tags:
+        - Key: Purpose
+          Value: IAM-Security-Automation
+
+  # SNS Topic for notifications
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${AWS::StackName}-InactiveUserNotifications'
+      DisplayName: 'IAM Inactive User Notifications'
+      Subscription:
+        - Endpoint: !Ref NotificationEmail
+          Protocol: email
+
+  # Lambda Execution Role for Scanner
+  ScannerLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-ScannerRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: IAMScannerPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:ListUsers
+                  - iam:GetUser
+                  - iam:ListAccessKeys
+                  - iam:GetAccessKeyLastUsed
+                  - iam:GetLoginProfile
+                  - iam:UpdateAccessKey
+                  - access-analyzer:GetGeneratedPolicy
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource: !GetAtt InactiveUsersTable.Arn
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref NotificationTopic
+
+  # Lambda Execution Role for Cleanup
+  CleanupLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-CleanupRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: IAMCleanupPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:DeleteUser
+                  - iam:DeleteAccessKey
+                  - iam:ListAccessKeys
+                  - iam:DeleteLoginProfile
+                  - iam:ListUserPolicies
+                  - iam:DeleteUserPolicy
+                  - iam:ListAttachedUserPolicies
+                  - iam:DetachUserPolicy
+                  - iam:RemoveUserFromGroup
+                  - iam:ListGroupsForUser
+                  - iam:DeleteSigningCertificate
+                  - iam:ListSigningCertificates
+                  - iam:DeleteSSHPublicKey
+                  - iam:ListSSHPublicKeys
+                  - iam:DeactivateMFADevice
+                  - iam:ListMFADevices
+                  - iam:DeleteVirtualMFADevice
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: !GetAtt InactiveUsersTable.StreamArn
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref NotificationTopic
+
+  # Scanner Lambda Function
+  ScannerLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-InactiveUserScanner'
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt ScannerLambdaExecutionRole.Arn
+      Timeout: 300
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref InactiveUsersTable
+          SNS_TOPIC_ARN: !Ref NotificationTopic
+          INACTIVITY_THRESHOLD_DAYS: !Ref InactivityThresholdDays
+          GRACE_PERIOD_DAYS: !Ref GracePeriodDays
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import json
+          from datetime import datetime, timezone, timedelta
+          from decimal import Decimal
+
+          iam = boto3.client('iam')
+          dynamodb = boto3.resource('dynamodb')
+          sns = boto3.client('sns')
+
+          TABLE_NAME = os.environ['TABLE_NAME']
+          SNS_TOPIC_ARN = os.environ['SNS_TOPIC_ARN']
+          INACTIVITY_THRESHOLD_DAYS = int(os.environ['INACTIVITY_THRESHOLD_DAYS'])
+          GRACE_PERIOD_DAYS = int(os.environ['GRACE_PERIOD_DAYS'])
+
+          def lambda_handler(event, context):
+              print(f"Starting IAM inactive user scan with threshold: {INACTIVITY_THRESHOLD_DAYS} days")
+              
+              table = dynamodb.Table(TABLE_NAME)
+              inactive_users = []
+              newly_flagged = []
+              
+              try:
+                  # List all IAM users
+                  paginator = iam.get_paginator('list_users')
+                  
+                  for page in paginator.paginate():
+                      for user in page['Users']:
+                          username = user['UserName']
+                          
+                          # Check if user is inactive
+                          if is_user_inactive(username):
+                              inactive_users.append(username)
+                              
+                              # Check if user is already in DynamoDB
+                              response = table.get_item(Key={'username': username})
+                              
+                              if 'Item' not in response:
+                                  # New inactive user - add to DynamoDB
+                                  ttl_timestamp = int((datetime.now(timezone.utc) + 
+                                                      timedelta(days=GRACE_PERIOD_DAYS)).timestamp())
+                                  
+                                  table.put_item(
+                                      Item={
+                                          'username': username,
+                                          'flagged_date': datetime.now(timezone.utc).isoformat(),
+                                          'ttl': ttl_timestamp,
+                                          'last_activity': get_last_activity_date(username),
+                                          'notification_sent': True,
+                                          'access_keys_disabled': False
+                                      }
+                                  )
+                                  
+                                  newly_flagged.append(username)
+                                  
+                                  # Disable access keys
+                                  disable_access_keys(username)
+                                  
+                                  # Update DynamoDB to reflect disabled keys
+                                  table.update_item(
+                                      Key={'username': username},
+                                      UpdateExpression='SET access_keys_disabled = :val',
+                                      ExpressionAttributeValues={':val': True}
+                                  )
+                                  
+                                  # Send notification
+                                  send_notification(username, ttl_timestamp)
+              
+                  # Summary report
+                  summary = {
+                      'total_inactive_users': len(inactive_users),
+                      'newly_flagged_users': len(newly_flagged),
+                      'users': newly_flagged
+                  }
+                  
+                  print(f"Scan complete: {json.dumps(summary, indent=2)}")
+                  
+                  # Send summary to SNS if there are newly flagged users
+                  if newly_flagged:
+                      sns.publish(
+                          TopicArn=SNS_TOPIC_ARN,
+                          Subject='IAM Inactive User Scan - Summary Report',
+                          Message=f"""IAM Inactive User Scan Summary
+                          
+          Scan Date: {datetime.now(timezone.utc).isoformat()}
+          Total Inactive Users: {len(inactive_users)}
+          Newly Flagged Users: {len(newly_flagged)}
+          
+          Newly Flagged Users:
+          {chr(10).join(f'  - {user}' for user in newly_flagged)}
+          
+          These users have been flagged for inactivity and will be deleted in {GRACE_PERIOD_DAYS} days.
+          Their access keys have been disabled immediately.
+          """
+                      )
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps(summary)
+                  }
+                  
+              except Exception as e:
+                  print(f"Error during scan: {str(e)}")
+                  raise
+
+          def is_user_inactive(username):
+              """Check if a user has been inactive based on access key and console usage"""
+              try:
+                  threshold_date = datetime.now(timezone.utc) - timedelta(days=INACTIVITY_THRESHOLD_DAYS)
+                  
+                  # Check console login
+                  try:
+                      user = iam.get_user(UserName=username)
+                      password_last_used = user['User'].get('PasswordLastUsed')
+                      
+                      if password_last_used and password_last_used > threshold_date:
+                          return False
+                  except iam.exceptions.NoSuchEntityException:
+                      pass
+                  
+                  # Check access keys
+                  access_keys = iam.list_access_keys(UserName=username)
+                  
+                  for key in access_keys['AccessKeyMetadata']:
+                      try:
+                          key_last_used = iam.get_access_key_last_used(AccessKeyId=key['AccessKeyId'])
+                          
+                          if 'LastUsedDate' in key_last_used['AccessKeyLastUsed']:
+                              last_used = key_last_used['AccessKeyLastUsed']['LastUsedDate']
+                              if last_used > threshold_date:
+                                  return False
+                      except Exception as e:
+                          print(f"Error checking access key for {username}: {str(e)}")
+                  
+                  return True
+                  
+              except Exception as e:
+                  print(f"Error checking inactivity for {username}: {str(e)}")
+                  return False
+
+          def get_last_activity_date(username):
+              """Get the last activity date for a user"""
+              try:
+                  last_activity = None
+                  
+                  # Check password last used
+                  try:
+                      user = iam.get_user(UserName=username)
+                      password_last_used = user['User'].get('PasswordLastUsed')
+                      if password_last_used:
+                          last_activity = password_last_used
+                  except:
+                      pass
+                  
+                  # Check access keys
+                  access_keys = iam.list_access_keys(UserName=username)
+                  for key in access_keys['AccessKeyMetadata']:
+                      try:
+                          key_last_used = iam.get_access_key_last_used(AccessKeyId=key['AccessKeyId'])
+                          if 'LastUsedDate' in key_last_used['AccessKeyLastUsed']:
+                              key_date = key_last_used['AccessKeyLastUsed']['LastUsedDate']
+                              if not last_activity or key_date > last_activity:
+                                  last_activity = key_date
+                      except:
+                          pass
+                  
+                  return last_activity.isoformat() if last_activity else 'Never'
+                  
+              except Exception as e:
+                  print(f"Error getting last activity for {username}: {str(e)}")
+                  return 'Unknown'
+
+          def disable_access_keys(username):
+              """Disable all access keys for a user"""
+              try:
+                  access_keys = iam.list_access_keys(UserName=username)
+                  
+                  for key in access_keys['AccessKeyMetadata']:
+                      if key['Status'] == 'Active':
+                          iam.update_access_key(
+                              UserName=username,
+                              AccessKeyId=key['AccessKeyId'],
+                              Status='Inactive'
+                          )
+                          print(f"Disabled access key {key['AccessKeyId']} for user {username}")
+                          
+              except Exception as e:
+                  print(f"Error disabling access keys for {username}: {str(e)}")
+
+          def send_notification(username, ttl_timestamp):
+              """Send SNS notification about inactive user"""
+              try:
+                  deletion_date = datetime.fromtimestamp(ttl_timestamp, tz=timezone.utc)
+                  
+                  message = f"""ALERT: IAM User Flagged for Inactivity
+                  
+          Username: {username}
+          Flagged Date: {datetime.now(timezone.utc).isoformat()}
+          Last Activity: {get_last_activity_date(username)}
+          
+          ACTION REQUIRED:
+          This IAM user has been inactive for {INACTIVITY_THRESHOLD_DAYS} days.
+          Access keys have been DISABLED immediately.
+          
+          The user will be DELETED on: {deletion_date.strftime('%Y-%m-%d %H:%M:%S UTC')}
+          
+          If this user should remain active, please:
+          1. Contact your AWS administrator
+          2. Have the user log in or use their access keys
+          3. Remove the user from the tracking table if needed
+          
+          Grace Period: {GRACE_PERIOD_DAYS} days
+          """
+                  
+                  sns.publish(
+                      TopicArn=SNS_TOPIC_ARN,
+                      Subject=f'IAM User Inactive: {username}',
+                      Message=message
+                  )
+                  
+                  print(f"Notification sent for user: {username}")
+                  
+              except Exception as e:
+                  print(f"Error sending notification for {username}: {str(e)}")
+
+  # Cleanup Lambda Function
+  CleanupLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-InactiveUserCleanup'
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt CleanupLambdaExecutionRole.Arn
+      Timeout: 300
+      MemorySize: 256
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref NotificationTopic
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import json
+
+          iam = boto3.client('iam')
+          sns = boto3.client('sns')
+
+          SNS_TOPIC_ARN = os.environ['SNS_TOPIC_ARN']
+
+          def lambda_handler(event, context):
+              print(f"Processing DynamoDB Stream event: {json.dumps(event)}")
+              
+              deleted_users = []
+              
+              for record in event['Records']:
+                  if record['eventName'] == 'REMOVE' and 'ttl' in record['userIdentity']:
+                      # TTL deletion - cleanup the IAM user
+                      username = record['dynamodb']['Keys']['username']['S']
+                      
+                      try:
+                          delete_iam_user(username)
+                          deleted_users.append(username)
+                          print(f"Successfully deleted IAM user: {username}")
+                          
+                      except Exception as e:
+                          print(f"Error deleting user {username}: {str(e)}")
+                          # Send error notification
+                          send_error_notification(username, str(e))
+              
+              # Send summary notification
+              if deleted_users:
+                  send_summary_notification(deleted_users)
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({'deleted_users': deleted_users})
+              }
+
+          def delete_iam_user(username):
+              """Completely delete an IAM user and all associated resources"""
+              
+              # 1. Remove user from all groups
+              try:
+                  groups = iam.list_groups_for_user(UserName=username)
+                  for group in groups['Groups']:
+                      iam.remove_user_from_group(
+                          GroupName=group['GroupName'],
+                          UserName=username
+                      )
+                      print(f"Removed {username} from group {group['GroupName']}")
+              except Exception as e:
+                  print(f"Error removing groups: {str(e)}")
+              
+              # 2. Detach all managed policies
+              try:
+                  attached_policies = iam.list_attached_user_policies(UserName=username)
+                  for policy in attached_policies['AttachedPolicies']:
+                      iam.detach_user_policy(
+                          UserName=username,
+                          PolicyArn=policy['PolicyArn']
+                      )
+                      print(f"Detached policy {policy['PolicyArn']}")
+              except Exception as e:
+                  print(f"Error detaching policies: {str(e)}")
+              
+              # 3. Delete all inline policies
+              try:
+                  inline_policies = iam.list_user_policies(UserName=username)
+                  for policy_name in inline_policies['PolicyNames']:
+                      iam.delete_user_policy(
+                          UserName=username,
+                          PolicyName=policy_name
+                      )
+                      print(f"Deleted inline policy {policy_name}")
+              except Exception as e:
+                  print(f"Error deleting inline policies: {str(e)}")
+              
+              # 4. Delete all access keys
+              try:
+                  access_keys = iam.list_access_keys(UserName=username)
+                  for key in access_keys['AccessKeyMetadata']:
+                      iam.delete_access_key(
+                          UserName=username,
+                          AccessKeyId=key['AccessKeyId']
+                      )
+                      print(f"Deleted access key {key['AccessKeyId']}")
+              except Exception as e:
+                  print(f"Error deleting access keys: {str(e)}")
+              
+              # 5. Delete login profile (console password)
+              try:
+                  iam.delete_login_profile(UserName=username)
+                  print(f"Deleted login profile")
+              except iam.exceptions.NoSuchEntityException:
+                  print("No login profile to delete")
+              except Exception as e:
+                  print(f"Error deleting login profile: {str(e)}")
+              
+              # 6. Deactivate MFA devices
+              try:
+                  mfa_devices = iam.list_mfa_devices(UserName=username)
+                  for device in mfa_devices['MFADevices']:
+                      iam.deactivate_mfa_device(
+                          UserName=username,
+                          SerialNumber=device['SerialNumber']
+                      )
+                      print(f"Deactivated MFA device {device['SerialNumber']}")
+                      
+                      # Delete virtual MFA if applicable
+                      if 'arn:aws:iam::' in device['SerialNumber'] and ':mfa/' in device['SerialNumber']:
+                          try:
+                              iam.delete_virtual_mfa_device(SerialNumber=device['SerialNumber'])
+                          except:
+                              pass
+              except Exception as e:
+                  print(f"Error handling MFA devices: {str(e)}")
+              
+              # 7. Delete SSH public keys
+              try:
+                  ssh_keys = iam.list_ssh_public_keys(UserName=username)
+                  for key in ssh_keys['SSHPublicKeys']:
+                      iam.delete_ssh_public_key(
+                          UserName=username,
+                          SSHPublicKeyId=key['SSHPublicKeyId']
+                      )
+                      print(f"Deleted SSH key {key['SSHPublicKeyId']}")
+              except Exception as e:
+                  print(f"Error deleting SSH keys: {str(e)}")
+              
+              # 8. Delete signing certificates
+              try:
+                  signing_certs = iam.list_signing_certificates(UserName=username)
+                  for cert in signing_certs['Certificates']:
+                      iam.delete_signing_certificate(
+                          UserName=username,
+                          CertificateId=cert['CertificateId']
+                      )
+                      print(f"Deleted signing certificate {cert['CertificateId']}")
+              except Exception as e:
+                  print(f"Error deleting signing certificates: {str(e)}")
+              
+              # 9. Finally, delete the user
+              iam.delete_user(UserName=username)
+              print(f"Deleted IAM user: {username}")
+
+          def send_summary_notification(deleted_users):
+              """Send notification about deleted users"""
+              try:
+                  message = f"""IAM User Cleanup Summary
+                  
+          The following IAM users have been automatically deleted due to inactivity:
+          
+          {chr(10).join(f'  - {user}' for user in deleted_users)}
+          
+          Total deleted: {len(deleted_users)}
+          
+          These users exceeded their grace period and have been completely removed from the AWS account.
+          """
+                  
+                  sns.publish(
+                      TopicArn=SNS_TOPIC_ARN,
+                      Subject='IAM Users Deleted - Cleanup Summary',
+                      Message=message
+                  )
+                  
+              except Exception as e:
+                  print(f"Error sending summary notification: {str(e)}")
+
+          def send_error_notification(username, error_message):
+              """Send notification about cleanup errors"""
+              try:
+                  message = f"""IAM User Cleanup Error
+                  
+          Failed to delete IAM user: {username}
+          
+          Error: {error_message}
+          
+          Manual intervention may be required.
+          """
+                  
+                  sns.publish(
+                      TopicArn=SNS_TOPIC_ARN,
+                      Subject=f'IAM User Deletion Failed: {username}',
+                      Message=message
+                  )
+                  
+              except Exception as e:
+                  print(f"Error sending error notification: {str(e)}")
+
+  # DynamoDB Stream Event Source Mapping
+  CleanupLambdaEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt InactiveUsersTable.StreamArn
+      FunctionName: !GetAtt CleanupLambdaFunction.Arn
+      StartingPosition: LATEST
+      BatchSize: 10
+      MaximumBatchingWindowInSeconds: 5
+
+  # CloudWatch Event Rule for daily scanning
+  DailyScanRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${AWS::StackName}-DailyScan'
+      Description: 'Trigger IAM inactive user scan daily'
+      ScheduleExpression: 'cron(0 9 * * ? *)'  # 9 AM UTC daily
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ScannerLambdaFunction.Arn
+          Id: ScannerLambdaTarget
+
+  # Permission for CloudWatch Events to invoke Scanner Lambda
+  ScannerLambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ScannerLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DailyScanRule.Arn
+
+  # CloudWatch Log Groups
+  ScannerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${ScannerLambdaFunction}'
+      RetentionInDays: 30
+
+  CleanupLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${CleanupLambdaFunction}'
+      RetentionInDays: 30
+
+Outputs:
+  DynamoDBTableName:
+    Description: 'DynamoDB table storing inactive users'
+    Value: !Ref InactiveUsersTable
+    Export:
+      Name: !Sub '${AWS::StackName}-TableName'
+
+  SNSTopicArn:
+    Description: 'SNS topic for notifications'
+    Value: !Ref NotificationTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-SNSTopicArn'
+
+  ScannerLambdaArn:
+    Description: 'Scanner Lambda function ARN'
+    Value: !GetAtt ScannerLambdaFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ScannerLambdaArn'
+
+  CleanupLambdaArn:
+    Description: 'Cleanup Lambda function ARN'
+    Value: !GetAtt CleanupLambdaFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-CleanupLambdaArn'
+
+  DailyScanSchedule:
+    Description: 'Daily scan schedule (UTC)'
+    Value: '9:00 AM UTC daily'

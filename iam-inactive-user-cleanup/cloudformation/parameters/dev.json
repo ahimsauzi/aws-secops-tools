@@ -1,0 +1,14 @@
+[
+  {
+    "ParameterKey": "InactivityThresholdDays",
+    "ParameterValue": "30"
+  },
+  {
+    "ParameterKey": "GracePeriodDays",
+    "ParameterValue": "7"
+  },
+  {
+    "ParameterKey": "NotificationEmail",
+    "ParameterValue": "devops-team@yourcompany.com"
+  }
+]
