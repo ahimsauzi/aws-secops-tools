@@ -60,6 +60,36 @@ A comprehensive CloudSecOps automation solution that automatically identifies, f
 - IAM permissions to create Lambda functions, DynamoDB tables, SNS topics, and IAM roles
 - Valid email address for notifications
 
+## 🏷️ User Exclusion
+
+### Federated Users
+
+Federated users (SSO, SAML, OIDC) are **automatically excluded** as they use IAM Roles instead of IAM Users. This solution only scans IAM Users created via `iam:CreateUser`.
+
+### Tag-Based Exclusion
+
+Exclude specific IAM users from cleanup by adding a tag:
+
+```bash
+# Tag a user for exclusion
+aws iam tag-user \
+  --user-name service-account \
+  --tags Key=IAMCleanupExclude,Value=true
+
+# Verify the tag
+aws iam list-user-tags --user-name service-account
+```
+
+**Configuration Parameters:**
+- `ExclusionTagKey`: Tag key for exclusions (default: `IAMCleanupExclude`)
+- `ExclusionTagValue`: Tag value for exclusions (default: `true`)
+
+Users with this tag will be automatically skipped during all scans. You can exclude any user type:
+- Service accounts
+- Automation users
+- Break-glass accounts
+- Special purpose accounts
+
 ## 🚀 Deployment
 
 ### Using AWS Console

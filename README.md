@@ -14,9 +14,11 @@ This repository contains a curated set of CloudFormation templates and automatio
 ## 🛠️ Available Tools
 
 ### [IAM Inactive User Cleanup](./iam-inactive-user-cleanup/)
+
 Automatically identifies, flags, and removes inactive IAM users to reduce attack surface.
 
 **Features:**
+
 - 🔍 Daily scanning for inactive users
 - 🚫 Immediate access key revocation
 - ⏰ Configurable grace period
@@ -34,6 +36,7 @@ Each tool has its own directory with complete documentation:
 
 ```bash
 # Clone the repository
+
 git clone https://github.com/yourusername/aws-secops-tools.git
 cd aws-secops-tools
 
@@ -122,6 +125,7 @@ We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.
 ## 📖 Documentation
 
 Each tool includes:
+
 - **README.md**: Overview, features, and quick start
 - **DEPLOYMENT_GUIDE.md**: Detailed deployment instructions and best practices
 - **CloudFormation Templates**: Infrastructure-as-Code for deployment

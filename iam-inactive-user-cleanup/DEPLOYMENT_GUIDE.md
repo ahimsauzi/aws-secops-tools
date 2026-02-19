@@ -74,6 +74,7 @@ python3 test_iam_cleanup.py --list-flagged
 ### 1. Staged Rollout
 
 **Phase 1: Test Environment (Week 1-2)**
+
 ```bash
 # Deploy to test/dev account first
 aws cloudformation create-stack \
@@ -88,6 +89,7 @@ aws cloudformation create-stack \
 ```
 
 **Phase 2: Production with Long Grace Period (Week 3-4)**
+
 ```bash
 # Deploy to production with extended grace period initially
 aws cloudformation create-stack \
@@ -102,6 +104,7 @@ aws cloudformation create-stack \
 ```
 
 **Phase 3: Optimize (Week 5+)**
+
 ```bash
 # After validating behavior, reduce grace period
 aws cloudformation update-stack \
@@ -117,6 +120,7 @@ aws cloudformation update-stack \
 ### 2. Pre-Deployment Assessment
 
 **Analyze Your Current IAM Users:**
+
 ```bash
 # Run assessment before deployment
 python3 test_iam_cleanup.py --check-users > iam_assessment.txt
@@ -126,6 +130,7 @@ cat iam_assessment.txt
 ```
 
 **Expected Output:**
+
 ```
 Total IAM Users: 45
 Inactive Users (>90 days): 12
@@ -137,6 +142,7 @@ Inactive Users:
 ```
 
 **Action Items:**
+
 1. Review the list with your team
 2. Identify service accounts (exclude them - see below)
 3. Contact users proactively before deployment
@@ -172,6 +178,7 @@ if should_exclude_user(username):
 ```
 
 **Tag your service accounts:**
+
 ```bash
 # Tag service accounts to exclude them
 aws iam tag-user \
@@ -286,11 +293,13 @@ done
 If a user is mistakenly deleted:
 
 1. **Recreate the user:**
+
 ```bash
 aws iam create-user --user-name john.doe
 ```
 
 2. **Restore policies from backup:**
+
 ```bash
 # Reattach managed policies
 aws iam attach-user-policy \
@@ -379,6 +388,7 @@ Please review and:
 The default roles are permissive. For production, restrict them:
 
 **Scanner Role - Restrict to specific user paths:**
+
 ```json
 {
   "Version": "2012-10-17",
@@ -481,6 +491,7 @@ Before going to production:
 If something goes wrong:
 
 1. **Immediate Stop:**
+
 ```bash
 # Disable the EventBridge rule to stop scans
 aws events disable-rule --name iam-inactive-user-cleanup-DailyScan
@@ -491,6 +502,7 @@ aws lambda delete-event-source-mapping \
 ```
 
 2. **Remove Flagged Users from DynamoDB:**
+
 ```bash
 # Clear all items from DynamoDB (prevents deletion)
 aws dynamodb scan \
@@ -505,6 +517,7 @@ done
 ```
 
 3. **Full Stack Deletion:**
+
 ```bash
 aws cloudformation delete-stack --stack-name iam-inactive-user-cleanup
 ```
