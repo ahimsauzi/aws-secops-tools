@@ -23,6 +23,7 @@ Common issues and solutions for IAM Inactive User Cleanup automation.
 **Possible Causes & Solutions**:
 
 1. **Insufficient IAM Permissions**
+
    ```bash
    # Check your current permissions
    aws iam get-user
@@ -31,9 +32,11 @@ Common issues and solutions for IAM Inactive User Cleanup automation.
    aws cloudformation validate-template \
      --template-body file://cloudformation/template.yaml
    ```
+   
    **Solution**: Ensure you have `CAPABILITY_NAMED_IAM` and permissions to create Lambda, DynamoDB, SNS, IAM roles.
 
 2. **Stack Name Already Exists**
+
    ```bash
    # Check existing stacks
    aws cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE
